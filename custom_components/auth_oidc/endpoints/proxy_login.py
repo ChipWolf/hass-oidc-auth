@@ -96,13 +96,23 @@ class OIDCProxyLoginView(HomeAssistantView):
             )
             return False
 
-        if self.token_exchange_config.get(TOKEN_EXCHANGE_REQUIRED_PROXY_HEADERS, True):
-            required_headers = (
-                "X-Forwarded-For",
-                "X-Forwarded-Proto",
-                "X-Forwarded-Host",
-            )
+        required = self.token_exchange_config.get(
+            TOKEN_EXCHANGE_REQUIRED_PROXY_HEADERS, True
+        )
+        if required:
+            if isinstance(required, list):
+                required_headers = tuple(required)
+            else:
+                # Default: only require X-Forwarded-For. Many proxies
+                # (Envoy, Traefik) do not set X-Forwarded-Host unless
+                # explicitly configured, so we don't require it.
+                required_headers = ("X-Forwarded-For",)
             if any(not request.headers.get(header) for header in required_headers):
+                _LOGGER.debug(
+                    "proxy-login rejected: missing required proxy headers "
+                    "(need %s)",
+                    required_headers,
+                )
                 return False
 
         return True
