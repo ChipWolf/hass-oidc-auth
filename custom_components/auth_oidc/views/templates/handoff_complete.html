@@ -41,7 +41,7 @@
         "/auth/login_flow",
         {
           client_id: clientId,
-          handler: ["oidc", null],
+          handler: ["auth_oidc", "default"],
           redirect_uri: `${window.location.origin}/?auth_callback=1`,
           type: "form",
         }
