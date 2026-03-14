@@ -26,6 +26,12 @@ from .config import (
     CLAIMS,
     ROLES,
     NETWORK,
+    MODE,
+    DEFAULT_MODE,
+    MODE_BROWSER_OIDC,
+    MODE_TOKEN_HANDOFF,
+    TOKEN_EXCHANGE,
+    TOKEN_EXCHANGE_ENABLED,
     FEATURES_INCLUDE_GROUPS_SCOPE,
     FEATURES_DISABLE_FRONTEND_INJECTION,
     FEATURES_FORCE_HTTPS,
@@ -39,6 +45,8 @@ from .endpoints import (
     OIDCRedirectView,
     OIDCFinishView,
     OIDCCallbackView,
+    OIDCProxyLoginView,
+    OIDCProxyLogoutView,
     OIDCInjectedAuthPage,
 )
 from .tools.oidc_client import OIDCClient
@@ -59,10 +67,9 @@ async def async_setup(hass: HomeAssistant, config):
         hass.data[DOMAIN] = {}
     hass.data[DOMAIN]["yaml_config"] = my_config
 
-    await _setup_oidc_provider(
+    return await _setup_oidc_provider(
         hass, my_config, config[DOMAIN].get(DISPLAY_NAME, DEFAULT_TITLE)
     )
-    return True
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
@@ -76,8 +83,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry):
     # Get display name from config entry
     display_name = config_data.get("display_name", DEFAULT_TITLE)
 
-    await _setup_oidc_provider(hass, my_config, display_name)
-    return True
+    return await _setup_oidc_provider(hass, my_config, display_name)
 
 
 async def async_unload_entry(_hass: HomeAssistant, _entry: ConfigEntry):
@@ -145,25 +151,48 @@ async def _setup_oidc_provider(hass: HomeAssistant, my_config: dict, display_nam
 
     force_https = features_config.get(FEATURES_FORCE_HTTPS, False)
 
-    hass.http.register_view(
-        OIDCWelcomeView(
-            name,
-            # Welcome view is not enabled if frontend injection is enabled
-            not is_frontend_injection_enabled,
-            force_https,
+    mode = my_config.get(MODE, DEFAULT_MODE)
+    token_exchange_config = my_config.get(TOKEN_EXCHANGE, {})
+
+    if mode == MODE_TOKEN_HANDOFF:
+        if not token_exchange_config.get(TOKEN_EXCHANGE_ENABLED, False):
+            _LOGGER.error(
+                "token_handoff mode requires token_exchange.enabled=true in YAML config."
+            )
+            return False
+
+        hass.http.register_view(
+            OIDCProxyLoginView(
+                oidc_client=oidc_client,
+                oidc_provider=provider,
+                token_exchange_config=token_exchange_config,
+            )
         )
-    )
-    hass.http.register_view(OIDCRedirectView(oidc_client, force_https))
-    hass.http.register_view(OIDCCallbackView(oidc_client, provider, force_https))
-    hass.http.register_view(OIDCFinishView())
+        hass.http.register_view(OIDCProxyLogoutView(my_config))
+        _LOGGER.info("Registered token handoff OIDC views")
+    elif mode == MODE_BROWSER_OIDC:
+        hass.http.register_view(
+            OIDCWelcomeView(
+                name,
+                # Welcome view is not enabled if frontend injection is enabled
+                not is_frontend_injection_enabled,
+                force_https,
+            )
+        )
+        hass.http.register_view(OIDCRedirectView(oidc_client, force_https))
+        hass.http.register_view(OIDCCallbackView(oidc_client, provider, force_https))
+        hass.http.register_view(OIDCFinishView())
 
-    _LOGGER.info("Registered OIDC views")
+        _LOGGER.info("Registered browser OIDC views")
 
-    # Inject OIDC code into the frontend for /auth/authorize if the user has the
-    # frontend injection feature enabled
-    if is_frontend_injection_enabled:
-        await OIDCInjectedAuthPage.inject(hass, name)
+        # Inject OIDC code into the frontend for /auth/authorize if the user has the
+        # frontend injection feature enabled
+        if is_frontend_injection_enabled:
+            await OIDCInjectedAuthPage.inject(hass, name)
+        else:
+            _LOGGER.info("OIDC frontend changes are disabled, skipping injection")
     else:
-        _LOGGER.info("OIDC frontend changes are disabled, skipping injection")
+        _LOGGER.error("Unsupported OIDC mode configured: %s", mode)
+        return False
 
     return True

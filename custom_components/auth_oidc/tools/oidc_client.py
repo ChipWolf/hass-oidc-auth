@@ -5,8 +5,10 @@ import logging
 import os
 import base64
 import hashlib
+import json
+import time
 import ssl
-from typing import Optional
+from typing import Optional, Any
 from functools import partial
 import aiohttp
 from joserfc import jwt, jwk, jws, errors as joserfc_errors
@@ -73,6 +75,10 @@ class OIDCStateInvalid(OIDCClientException):
 
 class OIDCUserinfoInvalid(OIDCClientException):
     "Raised when the user info is invalid or cannot be obtained."
+
+
+class OIDCExchangedTokenInvalid(OIDCTokenResponseInvalid):
+    "Raised when exchanged access token cannot be validated."
 
 
 class OIDCIdTokenSigningAlgorithmInvalid(OIDCTokenResponseInvalid):
@@ -336,11 +342,15 @@ class OIDCClient:
 
     def __del__(self):
         """Cleanup the HTTP session."""
+        # The aiohttp session close call is async. Avoid un-awaited close warnings
+        # from object finalizers by not attempting sync cleanup here.
+        return
 
-        # HA never seems to run this, but it's good practice to close the session
-        if self.http_session:
-            _LOGGER.debug("Closing HTTP session")
-            self.http_session.close()
+    async def async_close(self) -> None:
+        """Close created HTTP resources."""
+        if self.http_session is not None and not self.http_session.closed:
+            await self.http_session.close()
+        self.http_session = None
 
     def _base64url_encode(self, value: str) -> str:
         """Uses base64url encoding on a given string"""
@@ -607,36 +617,147 @@ class OIDCClient:
                 if claim not in id_token and claim in userinfo:
                     id_token[claim] = userinfo[claim]
 
-        # Get and parse groups (to check if it's an array)
-        groups = id_token.get(self.groups_claim, [])
+        return self._build_user_details_from_claims(id_token)
+
+    def _build_user_details_from_claims(self, claims: dict[str, Any]) -> UserDetails:
+        """Build user details from claims in a token-like object."""
+        groups = claims.get(self.groups_claim, [])
         if not isinstance(groups, list):
             _LOGGER.warning("Groups claim is not a list, using empty list instead.")
             groups = []
 
-        # Assign role if user has the required groups
         role = "invalid"
         if self.user_role in groups or self.user_role is None:
             role = "system-users"
-
         if self.admin_role in groups:
             role = "system-admin"
 
-        # Create a user details dict based on the contents of the id_token & userinfo
+        issuer = self.discovery_document["issuer"]
         return {
             # Subject Identifier. A locally unique and never reassigned identifier within the
             # Issuer for the End-User, which is intended to be consumed by the Client
             # Only unique per issuer, so we combine it with the issuer and hash it.
             # This might allow multiple OIDC providers to be used with this integration.
             "sub": hashlib.sha256(
-                f"{discovery_document['issuer']}.{id_token.get('sub')}".encode("utf-8")
+                f"{issuer}.{claims.get('sub')}".encode("utf-8")
             ).hexdigest(),
             # Display name, configurable
-            "display_name": id_token.get(self.display_name_claim),
+            "display_name": claims.get(self.display_name_claim),
             # Username, configurable
-            "username": id_token.get(self.username_claim),
+            "username": claims.get(self.username_claim),
             # Role
             "role": role,
         }
+
+    def _decode_jwt_claims_without_verification(
+        self, token: str
+    ) -> Optional[dict[str, Any]]:
+        """Decode compact JWT claims without signature verification."""
+        parts = token.split(".")
+        if len(parts) != 3:
+            _LOGGER.warning("Exchanged token is not a compact JWT.")
+            return None
+
+        payload = parts[1]
+        padding = "=" * ((4 - len(payload) % 4) % 4)
+        try:
+            decoded = base64.urlsafe_b64decode(payload + padding).decode("utf-8")
+            claims = json.loads(decoded)
+        except (ValueError, TypeError, json.JSONDecodeError):
+            _LOGGER.warning("Failed to decode exchanged token claims.")
+            return None
+
+        if not isinstance(claims, dict):
+            _LOGGER.warning("Decoded exchanged token claims are not an object.")
+            return None
+        return claims
+
+    def _validate_exchanged_token_claims(
+        self, token_claims: dict[str, Any], expected_audience: str
+    ) -> bool:
+        """Validate exchanged token claims for token handoff mode."""
+        issuer = token_claims.get("iss")
+        if issuer != self.discovery_document["issuer"]:
+            _LOGGER.warning("Issuer mismatch for exchanged token.")
+            return False
+
+        audience = token_claims.get("aud")
+        if isinstance(audience, str):
+            audience_valid = audience == expected_audience
+        elif isinstance(audience, list):
+            audience_valid = expected_audience in audience
+        else:
+            audience_valid = False
+
+        if not audience_valid:
+            _LOGGER.warning("Audience mismatch for exchanged token.")
+            return False
+
+        expiration = token_claims.get("exp")
+        now = int(time.time())
+        if not isinstance(expiration, int) or expiration <= now:
+            _LOGGER.warning("Exchanged token has expired or missing exp.")
+            return False
+
+        if not token_claims.get("sub"):
+            _LOGGER.warning("Exchanged token is missing sub claim.")
+            return False
+
+        return True
+
+    async def async_exchange_subject_token(
+        self,
+        requester_client_id: str,
+        requester_client_secret: str,
+        subject_token: str,
+        audience: str,
+    ) -> Optional[UserDetails]:
+        """Exchange an upstream token and map it to local user details."""
+        try:
+            discovery_document = await self._fetch_discovery_document()
+            token_endpoint = discovery_document["token_endpoint"]
+
+            request_payload = {
+                "grant_type": "urn:ietf:params:oauth:grant-type:token-exchange",
+                "client_id": requester_client_id,
+                "client_secret": requester_client_secret,
+                "subject_token": subject_token,
+                "subject_token_type": "urn:ietf:params:oauth:token-type:access_token",
+                "requested_token_type": "urn:ietf:params:oauth:token-type:access_token",
+                "audience": audience,
+            }
+
+            token_response = await self._make_token_request(token_endpoint, request_payload)
+            exchanged_token = token_response.get("access_token")
+            if not exchanged_token:
+                _LOGGER.warning("Token exchange did not return access_token.")
+                raise OIDCExchangedTokenInvalid()
+
+            issued_token_type = token_response.get("issued_token_type")
+            if issued_token_type and (
+                issued_token_type != "urn:ietf:params:oauth:token-type:access_token"
+            ):
+                _LOGGER.warning("Token exchange returned unexpected issued_token_type.")
+                raise OIDCExchangedTokenInvalid()
+
+            token_type = token_response.get("token_type")
+            if token_type and token_type.lower() != "bearer":
+                _LOGGER.warning("Token exchange returned non-bearer token_type.")
+                raise OIDCExchangedTokenInvalid()
+
+            token_claims = self._decode_jwt_claims_without_verification(exchanged_token)
+            if not token_claims:
+                raise OIDCExchangedTokenInvalid()
+
+            if not self._validate_exchanged_token_claims(token_claims, audience):
+                raise OIDCExchangedTokenInvalid()
+
+            data = self._build_user_details_from_claims(token_claims)
+            _LOGGER.debug("Obtained user details from exchanged token: %s", data)
+            return data
+        except OIDCClientException as e:
+            _LOGGER.warning("Failed token handoff exchange: %s", e)
+            return None
 
     async def async_complete_token_flow(
         self, redirect_uri: str, code: str, state: str

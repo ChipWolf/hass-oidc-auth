@@ -6,7 +6,15 @@ from homeassistant.core import HomeAssistant
 from homeassistant.setup import async_setup_component
 
 from custom_components.auth_oidc import DOMAIN
-from custom_components.auth_oidc.config.const import ADDITIONAL_SCOPES
+from custom_components.auth_oidc.config.const import (
+    ADDITIONAL_SCOPES,
+    MODE,
+    MODE_TOKEN_HANDOFF,
+    TOKEN_EXCHANGE,
+    TOKEN_EXCHANGE_ENABLED,
+    TOKEN_EXCHANGE_REQUESTER_CLIENT_ID,
+    TOKEN_EXCHANGE_REQUESTER_CLIENT_SECRET,
+)
 
 
 async def setup(hass: HomeAssistant, config: dict, expect_success: bool) -> bool:
@@ -91,3 +99,39 @@ async def test_setup_failure_partial_empty_yaml_client(hass: HomeAssistant, capl
         "Setup failed for custom integration 'auth_oidc': Invalid config."
         in caplog.text
     )
+
+
+@pytest.mark.asyncio
+async def test_setup_success_token_handoff_yaml(hass: HomeAssistant):
+    """Test successful setup of token handoff YAML mode."""
+    await setup(
+        hass,
+        {
+            "client_id": "homeassistant",
+            "discovery_url": "https://example.com/.well-known/openid-configuration",
+            MODE: MODE_TOKEN_HANDOFF,
+            TOKEN_EXCHANGE: {
+                TOKEN_EXCHANGE_ENABLED: True,
+                TOKEN_EXCHANGE_REQUESTER_CLIENT_ID: "ha-token-exchange",
+                TOKEN_EXCHANGE_REQUESTER_CLIENT_SECRET: "secret",
+            },
+        },
+        True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_setup_failure_token_handoff_missing_exchange(
+    hass: HomeAssistant, caplog
+):
+    """Test token_handoff mode fails without required exchange config."""
+    await setup(
+        hass,
+        {
+            "client_id": "homeassistant",
+            "discovery_url": "https://example.com/.well-known/openid-configuration",
+            MODE: MODE_TOKEN_HANDOFF,
+        },
+        False,
+    )
+    assert "token_exchange.enabled must be true when mode=token_handoff" in caplog.text

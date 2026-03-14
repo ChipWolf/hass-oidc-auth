@@ -40,6 +40,20 @@ ROLE_USERS = "user"
 NETWORK = "network"
 NETWORK_TLS_VERIFY = "tls_verify"
 NETWORK_TLS_CA_PATH = "tls_ca_path"
+MODE = "mode"
+MODE_BROWSER_OIDC = "browser_oidc"
+MODE_TOKEN_HANDOFF = "token_handoff"
+TOKEN_EXCHANGE = "token_exchange"
+TOKEN_EXCHANGE_ENABLED = "enabled"
+TOKEN_EXCHANGE_REQUESTER_CLIENT_ID = "requester_client_id"
+TOKEN_EXCHANGE_REQUESTER_CLIENT_SECRET = "requester_client_secret"
+TOKEN_EXCHANGE_SUBJECT_TOKEN_HEADER = "subject_token_header"
+TOKEN_EXCHANGE_SUBJECT_TOKEN_PREFIX = "subject_token_prefix"
+TOKEN_EXCHANGE_JWT_ASSERTION_HEADER = "jwt_assertion_header"
+TOKEN_EXCHANGE_AUDIENCE = "audience"
+TOKEN_EXCHANGE_RATE_LIMIT_PER_MINUTE = "rate_limit_per_minute"
+TOKEN_EXCHANGE_REQUIRED_PROXY_HEADERS = "required_proxy_headers"
+LOGOUT_REDIRECT_URL = "logout_redirect_url"
 
 ## ===
 ## Default configurations for providers
@@ -47,6 +61,11 @@ NETWORK_TLS_CA_PATH = "tls_ca_path"
 
 REQUIRED_SCOPES = "openid profile"
 DEFAULT_ID_TOKEN_SIGNING_ALGORITHM = "RS256"
+DEFAULT_MODE = MODE_BROWSER_OIDC
+DEFAULT_SUBJECT_TOKEN_HEADER = "Authorization"
+DEFAULT_SUBJECT_TOKEN_PREFIX = "Bearer "
+DEFAULT_JWT_ASSERTION_HEADER = "X-Forwarded-Jwt-Assertion"
+DEFAULT_SUBJECT_TOKEN_FALLBACK_HEADER = "X-Forwarded-Access-Token"
 
 DEFAULT_GROUPS_SCOPE = "groups"
 DEFAULT_ADMIN_GROUP = "admins"

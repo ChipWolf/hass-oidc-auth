@@ -139,6 +139,37 @@ auth_oidc:
 > [!CAUTION]
 > Do not disable `tls_verify` in a production setting or when your Home Assistant installation is exposed outside of your network. If disabled, man-in-the-middle attacks can be used to change the provider configuration to allow fake tokens to be used.
 
+### Token handoff mode (Envoy + Keycloak exchange)
+
+Use this mode when an upstream proxy (for example Envoy) already authenticated the browser and forwards a bearer token to Home Assistant. In this mode, Home Assistant does not run browser OIDC redirects. Instead it exchanges the upstream token with Keycloak server-side and creates a normal HA session.
+
+```yaml
+auth_oidc:
+  mode: token_handoff
+  client_id: "homeassistant"
+  discovery_url: "https://auth.gasm.dev/realms/home/.well-known/openid-configuration"
+  token_exchange:
+    enabled: true
+    requester_client_id: "ha-token-exchange"
+    requester_client_secret: !secret ha_token_exchange_secret
+    subject_token_header: "Authorization"
+    subject_token_prefix: "Bearer "
+    audience: "homeassistant"
+  claims:
+    username: preferred_username
+    display_name: name
+    groups: groups
+  features:
+    automatic_user_linking: true
+```
+
+Operational requirements:
+- Configure Home Assistant `http` integration with `use_x_forwarded_for` and `trusted_proxies`.
+- Expose `/auth/oidc/proxy-login` only through your trusted proxy.
+- Forward token headers only on your HA route.
+- Configure Keycloak requester client as confidential and enable Standard Token Exchange.
+- Ensure incoming subject token is acceptable for Keycloak exchange policy and exchanged token audience matches your HA client.
+
 ## All configuration Options
 
 Here's a table of all options that you can set:
@@ -165,3 +196,13 @@ Here's a table of all options that you can set:
 | `roles.user`            | `string` | No       |                     | Group name to require for users to get the 'user' role in Home Assistant. Defaults to giving all users this role, unless configured. |
 | `network.tls_verify`         | `boolean` | No       | `true`                     | Verify TLS certificate. You may want to set this set to `false` when testing locally. |
 | `network.tls_ca_path`            | `string` | No       |                       | Path to file containing a private certificate authority chain. |
+| `mode`            | `string` | No       | `browser_oidc`              | Auth mode selection. Use `browser_oidc` (default) or `token_handoff` for trusted-proxy token exchange flow. |
+| `token_exchange.enabled`            | `boolean` | No       | `false`              | Enables token exchange support. Must be `true` when `mode` is `token_handoff`. |
+| `token_exchange.requester_client_id`            | `string` | No       |                       | Confidential Keycloak requester client used for token exchange. Required in `token_handoff`. |
+| `token_exchange.requester_client_secret`            | `string` | No       |                       | Requester client secret. Use `!secret`. Required in `token_handoff`. |
+| `token_exchange.subject_token_header`            | `string` | No       | `Authorization`              | Primary header to read incoming upstream subject token from. |
+| `token_exchange.subject_token_prefix`            | `string` | No       | `Bearer `              | Prefix stripped from `subject_token_header` value before exchange. |
+| `token_exchange.jwt_assertion_header`            | `string` | No       | `X-Forwarded-Jwt-Assertion`              | Optional fallback header used when primary token header is not present. |
+| `token_exchange.audience`            | `string` | No       | `client_id`              | Audience requested during token exchange, typically your HA client id. |
+| `token_exchange.rate_limit_per_minute`            | `integer` | No       | `30`              | Per-source rate limit for the trusted proxy login endpoint. |
+| `logout_redirect_url`            | `string` | No       | `/`              | Optional redirect target after local handoff logout endpoint clears bootstrap cookie. |

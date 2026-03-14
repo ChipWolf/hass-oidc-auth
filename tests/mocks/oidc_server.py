@@ -102,6 +102,17 @@ class MockOIDCServer:
 
     def _get_token_response(self, body: dict) -> tuple[dict, int]:
         """Return a mock token response."""
+        if (
+            body.get("grant_type")
+            == "urn:ietf:params:oauth:grant-type:token-exchange"
+            and body.get("subject_token")
+        ):
+            return {
+                "access_token": self._create_exchanged_access_token(body),
+                "issued_token_type": "urn:ietf:params:oauth:token-type:access_token",
+                "token_type": "Bearer",
+                "expires_in": 300,
+            }, 200
 
         if body.get("code") in self._code_storage:
             # TODO: Verify PKCE?
@@ -113,6 +124,29 @@ class MockOIDCServer:
             }, 200
         else:
             return {"error": "invalid_request"}, 400
+
+    def _create_exchanged_access_token(self, body: dict) -> str:
+        """Create a mock exchanged access token."""
+        requested_audience = body.get("audience")
+        issuer = self._scenario.get("exchange_issuer", BASE_URL)
+        audience = self._scenario.get("exchange_aud", requested_audience)
+        username = self._scenario.get("username", "testuser")
+        groups = self._scenario.get("groups", [])
+
+        header = {"alg": self._jwk.alg, "kid": self._jwk.kid}
+        claims = {
+            "iss": issuer,
+            "sub": SUBJECT,
+            "aud": audience,
+            "name": "Test Name",
+            "preferred_username": username,
+            "groups": groups,
+        }
+        now = int(time.time())
+        claims["nbf"] = now
+        claims["iat"] = now
+        claims["exp"] = self._scenario.get("exchange_exp", now + 300)
+        return jwt.encode(header, claims, self._jwk)
 
     def _create_id_token(self, code: str) -> str:
         """Create a mock ID token."""

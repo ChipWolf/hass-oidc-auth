@@ -7,7 +7,7 @@ from homeassistant.setup import async_setup_component
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from auth_oidc import DOMAIN
-from auth_oidc.tools.oidc_client import OIDCDiscoveryClient, OIDCDiscoveryInvalid
+from auth_oidc.tools.oidc_client import OIDCClient, OIDCDiscoveryClient, OIDCDiscoveryInvalid
 from auth_oidc.config.const import (
     DISCOVERY_URL,
     CLIENT_ID,
@@ -29,6 +29,20 @@ async def setup(hass: HomeAssistant):
 
     result = await async_setup_component(hass, DOMAIN, mock_config)
     assert result
+
+
+def get_client(hass: HomeAssistant) -> OIDCClient:
+    """Build a standalone OIDC client for direct method tests."""
+    return OIDCClient(
+        hass=hass,
+        discovery_url=MockOIDCServer.get_discovery_url(),
+        client_id=EXAMPLE_CLIENT_ID,
+        scope="openid profile groups",
+        features={},
+        claims={},
+        roles={},
+        network={},
+    )
 
 
 @pytest.mark.asyncio
@@ -285,3 +299,50 @@ async def test_direct_jwks_fetch(hass: HomeAssistant):
         await client.fetch_discovery_document()
         jwks = await client.fetch_jwks()
         assert "keys" in jwks
+
+
+@pytest.mark.asyncio
+async def test_token_exchange_success(hass: HomeAssistant):
+    """Test successful token exchange and claim mapping."""
+    client = get_client(hass)
+    with mock_oidc_responses():
+        user_details = await client.async_exchange_subject_token(
+            requester_client_id="ha-token-exchange",
+            requester_client_secret="secret",
+            subject_token="envoy-upstream-token",
+            audience=EXAMPLE_CLIENT_ID,
+        )
+    await client.async_close()
+    assert user_details is not None
+    assert user_details["sub"] == MockOIDCServer.get_final_subject()
+    assert user_details["username"] == "testuser"
+
+
+@pytest.mark.asyncio
+async def test_token_exchange_bad_issuer(hass: HomeAssistant):
+    """Test token exchange rejects issuer mismatch."""
+    client = get_client(hass)
+    with mock_oidc_responses("exchange_bad_issuer"):
+        user_details = await client.async_exchange_subject_token(
+            requester_client_id="ha-token-exchange",
+            requester_client_secret="secret",
+            subject_token="envoy-upstream-token",
+            audience=EXAMPLE_CLIENT_ID,
+        )
+    await client.async_close()
+    assert user_details is None
+
+
+@pytest.mark.asyncio
+async def test_token_exchange_bad_audience(hass: HomeAssistant):
+    """Test token exchange rejects audience mismatch."""
+    client = get_client(hass)
+    with mock_oidc_responses("exchange_bad_audience"):
+        user_details = await client.async_exchange_subject_token(
+            requester_client_id="ha-token-exchange",
+            requester_client_secret="secret",
+            subject_token="envoy-upstream-token",
+            audience=EXAMPLE_CLIENT_ID,
+        )
+    await client.async_close()
+    assert user_details is None

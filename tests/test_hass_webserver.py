@@ -1,7 +1,15 @@
 """Tests for the registered webpages"""
 
 import os
+import ipaddress
 from auth_oidc.config.const import (
+    MODE,
+    MODE_TOKEN_HANDOFF,
+    TOKEN_EXCHANGE,
+    TOKEN_EXCHANGE_ENABLED,
+    TOKEN_EXCHANGE_REQUESTER_CLIENT_ID,
+    TOKEN_EXCHANGE_REQUESTER_CLIENT_SECRET,
+    TOKEN_EXCHANGE_AUDIENCE,
     DISCOVERY_URL,
     CLIENT_ID,
     FEATURES,
@@ -14,6 +22,7 @@ from homeassistant.setup import async_setup_component
 from homeassistant.components.http import StaticPathConfig, DOMAIN as HTTP_DOMAIN
 
 from custom_components.auth_oidc import DOMAIN
+from .mocks.oidc_server import MockOIDCServer, mock_oidc_responses
 
 
 async def setup(hass: HomeAssistant, enable_frontend_changes: bool = None):
@@ -32,6 +41,41 @@ async def setup(hass: HomeAssistant, enable_frontend_changes: bool = None):
 
     result = await async_setup_component(hass, DOMAIN, mock_config)
     assert result
+
+
+async def setup_token_handoff(hass: HomeAssistant):
+    """Set up token handoff mode."""
+    await async_setup_component(
+        hass,
+        HTTP_DOMAIN,
+        {
+            HTTP_DOMAIN: {
+                "use_x_forwarded_for": True,
+                "trusted_proxies": ["127.0.0.1"],
+            }
+        },
+    )
+
+    mock_config = {
+        DOMAIN: {
+            CLIENT_ID: "homeassistant",
+            DISCOVERY_URL: MockOIDCServer.get_discovery_url(),
+            MODE: MODE_TOKEN_HANDOFF,
+            TOKEN_EXCHANGE: {
+                TOKEN_EXCHANGE_ENABLED: True,
+                TOKEN_EXCHANGE_REQUESTER_CLIENT_ID: "ha-token-exchange",
+                TOKEN_EXCHANGE_REQUESTER_CLIENT_SECRET: "secret",
+                TOKEN_EXCHANGE_AUDIENCE: "homeassistant",
+                "required_proxy_headers": False,
+                "subject_token_header": "X-Forwarded-Access-Token",
+                "subject_token_prefix": "",
+            },
+        }
+    }
+    result = await async_setup_component(hass, DOMAIN, mock_config)
+    assert result
+    hass.http.use_x_forwarded_for = True
+    hass.http.trusted_proxies = [ipaddress.ip_network("127.0.0.0/8")]
 
 
 @pytest.mark.asyncio
@@ -150,3 +194,72 @@ async def test_frontend_injection(hass: HomeAssistant, hass_client):
 
     assert "<script src='/auth/oidc/static/injection.js" in text
     assert 'window.sso_name = "OpenID Connect (SSO)";' in text
+
+
+@pytest.mark.asyncio
+async def test_proxy_login_success(hass: HomeAssistant, hass_client):
+    """Test token handoff endpoint login success."""
+    await setup_token_handoff(hass)
+
+    with mock_oidc_responses():
+        client = await hass_client()
+        resp = await client.get(
+            "/auth/oidc/proxy-login",
+            headers={
+                    "X-Forwarded-Access-Token": "envoy-token",
+            },
+            allow_redirects=False,
+        )
+    assert resp.status == 302
+    assert resp.headers["Location"] == "/?storeToken=true"
+    assert "auth_oidc_code" in resp.cookies
+
+
+@pytest.mark.asyncio
+async def test_proxy_login_rejects_untrusted_source(hass: HomeAssistant, hass_client):
+    """Test token handoff endpoint rejects direct/untrusted calls."""
+    await setup_token_handoff(hass)
+    hass.http.trusted_proxies = [ipaddress.ip_network("10.10.0.0/16")]
+
+    with mock_oidc_responses():
+        client = await hass_client()
+        resp = await client.get(
+            "/auth/oidc/proxy-login",
+            headers={
+                    "X-Forwarded-Access-Token": "envoy-token",
+            },
+            allow_redirects=False,
+        )
+    assert resp.status == 403
+
+
+@pytest.mark.asyncio
+async def test_proxy_login_missing_token(hass: HomeAssistant, hass_client):
+    """Test token handoff endpoint requires a forwarded subject token."""
+    await setup_token_handoff(hass)
+
+    client = await hass_client()
+    resp = await client.get(
+        "/auth/oidc/proxy-login",
+        allow_redirects=False,
+    )
+    assert resp.status == 401
+
+
+@pytest.mark.asyncio
+async def test_proxy_login_rejects_invalid_exchange_token(
+    hass: HomeAssistant, hass_client
+):
+    """Test token handoff endpoint rejects invalid exchanged token claims."""
+    await setup_token_handoff(hass)
+
+    with mock_oidc_responses("exchange_bad_audience"):
+        client = await hass_client()
+        resp = await client.get(
+            "/auth/oidc/proxy-login",
+            headers={
+                    "X-Forwarded-Access-Token": "envoy-token",
+            },
+            allow_redirects=False,
+        )
+    assert resp.status == 401

@@ -26,11 +26,53 @@ from .const import (
     NETWORK,
     NETWORK_TLS_VERIFY,
     NETWORK_TLS_CA_PATH,
+    MODE,
+    MODE_BROWSER_OIDC,
+    MODE_TOKEN_HANDOFF,
+    TOKEN_EXCHANGE,
+    TOKEN_EXCHANGE_ENABLED,
+    TOKEN_EXCHANGE_REQUESTER_CLIENT_ID,
+    TOKEN_EXCHANGE_REQUESTER_CLIENT_SECRET,
+    TOKEN_EXCHANGE_SUBJECT_TOKEN_HEADER,
+    TOKEN_EXCHANGE_SUBJECT_TOKEN_PREFIX,
+    TOKEN_EXCHANGE_JWT_ASSERTION_HEADER,
+    TOKEN_EXCHANGE_AUDIENCE,
+    TOKEN_EXCHANGE_RATE_LIMIT_PER_MINUTE,
+    TOKEN_EXCHANGE_REQUIRED_PROXY_HEADERS,
+    LOGOUT_REDIRECT_URL,
     DOMAIN,
     DEFAULT_GROUPS_SCOPE,
+    DEFAULT_MODE,
+    DEFAULT_SUBJECT_TOKEN_HEADER,
+    DEFAULT_SUBJECT_TOKEN_PREFIX,
+    DEFAULT_JWT_ASSERTION_HEADER,
 )
 
-CONFIG_SCHEMA = vol.Schema(
+def _validate_mode_dependencies(config: dict) -> dict:
+    """Validate cross-field dependencies for advanced auth modes."""
+    oidc_config = config[DOMAIN]
+    if oidc_config.get(MODE, DEFAULT_MODE) == MODE_TOKEN_HANDOFF:
+        token_exchange = oidc_config.get(TOKEN_EXCHANGE, {})
+        if token_exchange.get(TOKEN_EXCHANGE_ENABLED, False) is not True:
+            raise vol.Invalid(
+                "token_exchange.enabled must be true when mode=token_handoff"
+            )
+
+        if not token_exchange.get(TOKEN_EXCHANGE_REQUESTER_CLIENT_ID):
+            raise vol.Invalid(
+                "token_exchange.requester_client_id is required when mode=token_handoff"
+            )
+
+        if not token_exchange.get(TOKEN_EXCHANGE_REQUESTER_CLIENT_SECRET):
+            raise vol.Invalid(
+                "token_exchange.requester_client_secret is required when mode=token_handoff"
+            )
+
+    return config
+
+
+CONFIG_SCHEMA = vol.All(
+    vol.Schema(
     {
         DOMAIN: vol.Schema(
             {
@@ -117,10 +159,51 @@ CONFIG_SCHEMA = vol.Schema(
                         vol.Optional(NETWORK_TLS_CA_PATH): vol.Coerce(str),
                     }
                 ),
+                # Select auth mode
+                vol.Optional(MODE, default=DEFAULT_MODE): vol.In(
+                    [MODE_BROWSER_OIDC, MODE_TOKEN_HANDOFF]
+                ),
+                # Token handoff / token exchange options
+                vol.Optional(TOKEN_EXCHANGE): vol.Schema(
+                    {
+                        vol.Optional(TOKEN_EXCHANGE_ENABLED, default=False): vol.Coerce(
+                            bool
+                        ),
+                        vol.Optional(TOKEN_EXCHANGE_REQUESTER_CLIENT_ID): vol.Coerce(
+                            str
+                        ),
+                        vol.Optional(
+                            TOKEN_EXCHANGE_REQUESTER_CLIENT_SECRET
+                        ): vol.Coerce(str),
+                        vol.Optional(
+                            TOKEN_EXCHANGE_SUBJECT_TOKEN_HEADER,
+                            default=DEFAULT_SUBJECT_TOKEN_HEADER,
+                        ): vol.Coerce(str),
+                        vol.Optional(
+                            TOKEN_EXCHANGE_SUBJECT_TOKEN_PREFIX,
+                            default=DEFAULT_SUBJECT_TOKEN_PREFIX,
+                        ): vol.Coerce(str),
+                        vol.Optional(
+                            TOKEN_EXCHANGE_JWT_ASSERTION_HEADER,
+                            default=DEFAULT_JWT_ASSERTION_HEADER,
+                        ): vol.Coerce(str),
+                        vol.Optional(TOKEN_EXCHANGE_AUDIENCE): vol.Coerce(str),
+                        vol.Optional(
+                            TOKEN_EXCHANGE_RATE_LIMIT_PER_MINUTE, default=30
+                        ): vol.All(vol.Coerce(int), vol.Range(min=1, max=600)),
+                        vol.Optional(
+                            TOKEN_EXCHANGE_REQUIRED_PROXY_HEADERS, default=True
+                        ): vol.Coerce(bool),
+                    }
+                ),
+                # Optional upstream logout URL in token_handoff mode
+                vol.Optional(LOGOUT_REDIRECT_URL): vol.Coerce(str),
             }
         )
     },
     # Any extra fields should not go into our config right now
     # You may set them for upgrading etc
     extra=vol.REMOVE_EXTRA,
+    ),
+    _validate_mode_dependencies,
 )

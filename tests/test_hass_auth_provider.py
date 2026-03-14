@@ -1,6 +1,7 @@
 """Tests for the Auth Provider registration in HA"""
 
 from urllib.parse import urlparse, parse_qs
+import ipaddress
 import pytest
 
 from homeassistant.core import HomeAssistant
@@ -8,11 +9,19 @@ from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.setup import async_setup_component
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.components.person import DOMAIN as PERSON_DOMAIN
+from homeassistant.components.http import DOMAIN as HTTP_DOMAIN
 
 from custom_components.auth_oidc import DOMAIN
 from custom_components.auth_oidc.config.const import (
     DISCOVERY_URL,
     CLIENT_ID,
+    MODE,
+    MODE_TOKEN_HANDOFF,
+    TOKEN_EXCHANGE,
+    TOKEN_EXCHANGE_ENABLED,
+    TOKEN_EXCHANGE_REQUESTER_CLIENT_ID,
+    TOKEN_EXCHANGE_REQUESTER_CLIENT_SECRET,
+    TOKEN_EXCHANGE_AUDIENCE,
     FEATURES,
     FEATURES_AUTOMATIC_PERSON_CREATION,
     FEATURES_AUTOMATIC_USER_LINKING,
@@ -117,6 +126,8 @@ async def test_full_login(hass: HomeAssistant, hass_client):
         },
         True,
     )
+    hass.http.use_x_forwarded_for = True
+    hass.http.trusted_proxies = [ipaddress.ip_network("127.0.0.0/8")]
 
     with mock_oidc_responses():
         # Actually start the login and get a code
@@ -227,3 +238,56 @@ async def test_login_shows_form(hass: HomeAssistant):
     result = await flow.async_step_init({"code": "invalid"})
     assert result["type"] == FlowResultType.FORM
     assert result["errors"] == {"base": "invalid_auth"}
+
+
+@pytest.mark.asyncio
+async def test_token_handoff_creates_user(hass: HomeAssistant, hass_client):
+    """Test token handoff mode creates and reuses user credentials."""
+    await async_setup_component(
+        hass,
+        HTTP_DOMAIN,
+        {
+            HTTP_DOMAIN: {
+                "use_x_forwarded_for": True,
+                "trusted_proxies": ["127.0.0.1"],
+            }
+        },
+    )
+
+    await setup(
+        hass,
+        {
+            CLIENT_ID: "homeassistant",
+            DISCOVERY_URL: MockOIDCServer.get_discovery_url(),
+            MODE: MODE_TOKEN_HANDOFF,
+            TOKEN_EXCHANGE: {
+                TOKEN_EXCHANGE_ENABLED: True,
+                TOKEN_EXCHANGE_REQUESTER_CLIENT_ID: "ha-token-exchange",
+                TOKEN_EXCHANGE_REQUESTER_CLIENT_SECRET: "secret",
+                TOKEN_EXCHANGE_AUDIENCE: "homeassistant",
+                "required_proxy_headers": False,
+                "subject_token_header": "X-Forwarded-Access-Token",
+                "subject_token_prefix": "",
+            },
+            FEATURES: {
+                FEATURES_AUTOMATIC_PERSON_CREATION: False,
+                FEATURES_AUTOMATIC_USER_LINKING: False,
+            },
+        },
+        True,
+    )
+
+    with mock_oidc_responses():
+        client = await hass_client()
+        resp = await client.get(
+            "/auth/oidc/proxy-login",
+            headers={
+                    "X-Forwarded-Access-Token": "envoy-token",
+            },
+            allow_redirects=False,
+        )
+        assert resp.status == 302
+        code = resp.cookies["auth_oidc_code"].value
+
+        user = await login_user(hass, code)
+        assert user.name == "Test Name"
