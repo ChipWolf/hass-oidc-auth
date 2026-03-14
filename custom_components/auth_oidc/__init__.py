@@ -47,6 +47,7 @@ from .endpoints import (
     OIDCCallbackView,
     OIDCProxyLoginView,
     OIDCProxyLogoutView,
+    OIDCHandoffCompleteView,
     OIDCInjectedAuthPage,
 )
 from .tools.oidc_client import OIDCClient
@@ -168,6 +169,7 @@ async def _setup_oidc_provider(hass: HomeAssistant, my_config: dict, display_nam
                 token_exchange_config=token_exchange_config,
             )
         )
+        hass.http.register_view(OIDCHandoffCompleteView())
         hass.http.register_view(OIDCProxyLogoutView(my_config))
         _LOGGER.info("Registered token handoff OIDC views")
     elif mode == MODE_BROWSER_OIDC:

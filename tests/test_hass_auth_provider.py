@@ -287,7 +287,11 @@ async def test_token_handoff_creates_user(hass: HomeAssistant, hass_client):
             allow_redirects=False,
         )
         assert resp.status == 302
-        code = resp.cookies["auth_oidc_code"].value
+        location = resp.headers["Location"]
+        assert location.startswith("/auth/oidc/handoff-complete?code=")
+        parsed_location = urlparse(location)
+        query_params = parse_qs(parsed_location.query)
+        code = query_params["code"][0]
 
         user = await login_user(hass, code)
         assert user.name == "Test Name"

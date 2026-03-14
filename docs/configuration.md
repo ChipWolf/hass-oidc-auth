@@ -143,6 +143,8 @@ auth_oidc:
 
 Use this mode when an upstream proxy (for example Envoy) already authenticated the browser and forwards a bearer token to Home Assistant. In this mode, Home Assistant does not run browser OIDC redirects. Instead it exchanges the upstream token with Keycloak server-side and creates a normal HA session.
 
+After successful token exchange, the integration redirects to `/auth/oidc/handoff-complete` and auto-completes HA's `login_flow` API in the browser. This removes the manual "click OIDC login" dependency in `token_handoff` mode.
+
 ```yaml
 auth_oidc:
   mode: token_handoff
@@ -187,10 +189,10 @@ Use the following routing logic in Envoy:
 3. Preserve token header forwarding for that request.
 4. Exclude these paths and query patterns from rewrite to prevent loops:
    - `/auth/oidc/proxy-login`
+   - `/auth/oidc/handoff-complete`
    - `/auth/oidc/proxy-logout`
    - `/auth/login_flow`
    - `/auth/authorize`
-   - any request containing `storeToken=true`
 
 Example logic (pseudo-config):
 
@@ -206,15 +208,15 @@ routes:
     action: forward_upstream
 
   - match:
+      path_prefix: "/auth/oidc/handoff-complete"
+    action: forward_upstream
+
+  - match:
       path_prefix: "/auth/login_flow"
     action: forward_upstream
 
   - match:
       path_prefix: "/auth/authorize"
-    action: forward_upstream
-
-  - match:
-      query_contains: "storeToken=true"
     action: forward_upstream
 
   - match:

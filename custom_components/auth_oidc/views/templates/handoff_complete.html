@@ -1,0 +1,100 @@
+{% extends "base.html" %}
+{% block title %}Signing in...{% endblock %}
+{% block content %}
+<div class="text-center">
+    <h1 class="text-2xl font-bold mb-4">Completing sign-in...</h1>
+    <p id="status" class="mb-4">Please wait, you will be redirected automatically.</p>
+    <pre id="error" class="hidden text-left text-sm bg-red-50 text-red-700 p-3 rounded"></pre>
+</div>
+
+<script>
+  (async () => {
+    const code = {{ code | tojson }};
+    const clientId = `${window.location.origin}/`;
+    const statusEl = document.getElementById("status");
+    const errorEl = document.getElementById("error");
+
+    const showError = (message) => {
+      statusEl.textContent = "Sign-in failed.";
+      errorEl.classList.remove("hidden");
+      errorEl.textContent = message;
+    };
+
+    const postJson = async (url, payload) => {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify(payload),
+      });
+      const data = await response.json().catch(() => ({}));
+      return { response, data };
+    };
+
+    try {
+      if (!code) {
+        showError("Missing handoff code.");
+        return;
+      }
+
+      const { response: flowResp, data: flowData } = await postJson(
+        "/auth/login_flow",
+        {
+          client_id: clientId,
+          handler: ["auth_oidc", null],
+          type: "form",
+        }
+      );
+
+      if (!flowResp.ok || !flowData.flow_id) {
+        showError(`Failed to create login flow: ${JSON.stringify(flowData)}`);
+        return;
+      }
+
+      const flowId = flowData.flow_id;
+      const { response: finishResp, data: finishData } = await postJson(
+        `/auth/login_flow/${flowId}`,
+        {
+          client_id: clientId,
+          code: code,
+        }
+      );
+
+      if (!finishResp.ok) {
+        showError(`Failed to complete login flow: ${JSON.stringify(finishData)}`);
+        return;
+      }
+
+      let tokenData = null;
+      if (finishData?.data?.access_token) {
+        tokenData = finishData.data;
+      } else if (finishData?.data?.auth_code || typeof finishData?.result === "string") {
+        const authCode = finishData?.data?.auth_code || finishData?.result;
+        const tokenResponse = await fetch("/auth/token", {
+          method: "POST",
+          headers: { "Content-Type": "application/x-www-form-urlencoded" },
+          credentials: "same-origin",
+          body: new URLSearchParams({
+            grant_type: "authorization_code",
+            code: authCode,
+            client_id: clientId,
+          }),
+        });
+        tokenData = await tokenResponse.json().catch(() => ({}));
+        if (!tokenResponse.ok || !tokenData?.access_token) {
+          showError(`Failed to exchange auth code for token: ${JSON.stringify(tokenData)}`);
+          return;
+        }
+      } else {
+        showError(`Unexpected login flow response: ${JSON.stringify(finishData)}`);
+        return;
+      }
+
+      localStorage.setItem("hassTokens", JSON.stringify(tokenData));
+      window.location.replace("/");
+    } catch (error) {
+      showError(String(error));
+    }
+  })();
+</script>
+{% endblock %}

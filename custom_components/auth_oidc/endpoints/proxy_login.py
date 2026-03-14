@@ -4,6 +4,7 @@ from collections import defaultdict
 import ipaddress
 import logging
 import time
+import urllib.parse
 
 from aiohttp import web
 from homeassistant.components.http import HomeAssistantView
@@ -46,21 +47,45 @@ class OIDCProxyLoginView(HomeAssistantView):
         self._attempts: dict[str, list[int]] = defaultdict(list)
 
     def _is_trusted_proxy_request(self, request: web.Request) -> bool:
-        """Validate that request came through trusted Home Assistant proxy path."""
+        """Validate that request came through trusted Home Assistant proxy path.
+
+        Uses the raw TCP peer address from the transport layer rather than
+        ``request.remote``, because HA's ``ForwardedMiddleware`` overwrites
+        ``request.remote`` with the real client IP when
+        ``use_x_forwarded_for`` is enabled.  The proxy trust check must
+        inspect the *direct connection* source, not the forwarded one.
+        """
         hass_http = self.oidc_provider.hass.http
         trusted_proxies = getattr(hass_http, "trusted_proxies", [])
         if not trusted_proxies:
             _LOGGER.debug("proxy-login rejected: trusted_proxies missing")
             return False
 
-        if not request.remote:
-            _LOGGER.debug("proxy-login rejected: request.remote missing")
+        # Prefer the raw transport peer address so we see the direct
+        # connection source even after HA middleware rewrites request.remote.
+        peer_ip_str: str | None = None
+        transport = getattr(request, "transport", None) or (
+            getattr(request, "_payload_writer", None)
+            and getattr(request._payload_writer, "transport", None)
+        )
+        if transport is not None:
+            peername = transport.get_extra_info("peername")
+            if peername:
+                peer_ip_str = peername[0]
+
+        # Fall back to request.remote when transport info is unavailable
+        # (e.g. during unit tests).
+        if not peer_ip_str:
+            peer_ip_str = request.remote
+
+        if not peer_ip_str:
+            _LOGGER.debug("proxy-login rejected: unable to determine source IP")
             return False
 
         try:
-            source_ip = ipaddress.ip_address(request.remote)
+            source_ip = ipaddress.ip_address(peer_ip_str)
         except ValueError:
-            _LOGGER.debug("proxy-login rejected: invalid source ip %s", request.remote)
+            _LOGGER.debug("proxy-login rejected: invalid source ip %s", peer_ip_str)
             return False
 
         if not self._source_matches_trusted_proxy(source_ip, trusted_proxies):
@@ -181,14 +206,8 @@ class OIDCProxyLoginView(HomeAssistantView):
             return web.Response(text="User is not permitted.", status=403)
 
         code = await self.oidc_provider.async_save_user_info(user_details)
-        raise web.HTTPFound(
-            location="/?storeToken=true",
-            headers={
-                "set-cookie": "auth_oidc_code="
-                + code
-                + "; Path=/auth/login_flow; SameSite=Strict; HttpOnly; Max-Age=5",
-            },
-        )
+        handoff_url = "/auth/oidc/handoff-complete?code=" + urllib.parse.quote_plus(code)
+        raise web.HTTPFound(location=handoff_url)
 
     async def get(self, request: web.Request) -> web.StreamResponse:
         """Handle GET requests."""

@@ -211,8 +211,37 @@ async def test_proxy_login_success(hass: HomeAssistant, hass_client):
             allow_redirects=False,
         )
     assert resp.status == 302
-    assert resp.headers["Location"] == "/?storeToken=true"
-    assert "auth_oidc_code" in resp.cookies
+    assert resp.headers["Location"].startswith("/auth/oidc/handoff-complete?code=")
+    assert "auth_oidc_code" not in resp.cookies
+
+
+@pytest.mark.asyncio
+async def test_handoff_complete_page_requires_code(hass: HomeAssistant, hass_client):
+    """Test handoff complete endpoint rejects missing code."""
+    await setup_token_handoff(hass)
+
+    client = await hass_client()
+    resp = await client.get("/auth/oidc/handoff-complete", allow_redirects=False)
+    assert resp.status == 400
+    text = await resp.text()
+    assert "Missing handoff code" in text
+
+
+@pytest.mark.asyncio
+async def test_handoff_complete_page_bootstrap(hass: HomeAssistant, hass_client):
+    """Test handoff complete endpoint renders login flow bootstrap script."""
+    await setup_token_handoff(hass)
+
+    client = await hass_client()
+    resp = await client.get(
+        "/auth/oidc/handoff-complete?code=test-code",
+        allow_redirects=False,
+    )
+    assert resp.status == 200
+    text = await resp.text()
+    assert "/auth/login_flow" in text
+    assert "hassTokens" in text
+    assert "test-code" in text
 
 
 @pytest.mark.asyncio
