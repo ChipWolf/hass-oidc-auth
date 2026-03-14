@@ -49,6 +49,7 @@ from .endpoints import (
     OIDCProxyLogoutView,
     OIDCHandoffCompleteView,
     OIDCInjectedAuthPage,
+    create_handoff_middleware,
 )
 from .tools.oidc_client import OIDCClient
 from .provider import OpenIDAuthProvider
@@ -171,7 +172,28 @@ async def _setup_oidc_provider(hass: HomeAssistant, my_config: dict, display_nam
         )
         hass.http.register_view(OIDCHandoffCompleteView())
         hass.http.register_view(OIDCProxyLogoutView(my_config))
-        _LOGGER.info("Registered token handoff OIDC views")
+
+        # Register the handoff middleware so that unauthenticated Keycloak
+        # requests are automatically redirected to proxy-login without
+        # needing an HTTPRoute URL rewrite on every request.
+        handoff_mw = create_handoff_middleware(oidc_client)
+        hass.http.app.middlewares.append(handoff_mw)
+
+        # Pre-fetch the OIDC discovery document in the background so the
+        # middleware has the Keycloak issuer available from the first request.
+        async def _prefetch_discovery(_event=None):
+            try:
+                await oidc_client._fetch_discovery_document()
+                _LOGGER.debug("Pre-fetched OIDC discovery document for middleware")
+            except Exception:  # noqa: BLE001
+                _LOGGER.warning(
+                    "Failed to pre-fetch OIDC discovery; middleware will "
+                    "pass through until discovery is loaded by a login attempt"
+                )
+
+        hass.async_create_task(_prefetch_discovery())
+
+        _LOGGER.info("Registered token handoff OIDC views and middleware")
     elif mode == MODE_BROWSER_OIDC:
         hass.http.register_view(
             OIDCWelcomeView(
