@@ -170,6 +170,71 @@ Operational requirements:
 - Configure Keycloak requester client as confidential and enable Standard Token Exchange.
 - Ensure incoming subject token is acceptable for Keycloak exchange policy and exchanged token audience matches your HA client.
 
+### Envoy routing for token handoff
+
+In `token_handoff` mode, Home Assistant does not automatically inspect arbitrary requests for bearer tokens. The first authenticated browser request must be routed to `/auth/oidc/proxy-login` so the plugin can perform token exchange and establish an HA session.
+
+Recommended proxy strategy:
+- Keep Envoy OIDC auth in front of Home Assistant.
+- After Envoy has authenticated the user, rewrite only the initial browser entry request to `/auth/oidc/proxy-login`.
+- Do not rewrite API/static/websocket traffic.
+- Do not rewrite requests that are already part of HA auth completion.
+
+Use the following routing logic in Envoy:
+
+1. Match authenticated browser request on entry paths (usually `/`).
+2. Rewrite upstream path to `/auth/oidc/proxy-login`.
+3. Preserve token header forwarding for that request.
+4. Exclude these paths and query patterns from rewrite to prevent loops:
+   - `/auth/oidc/proxy-login`
+   - `/auth/oidc/proxy-logout`
+   - `/auth/login_flow`
+   - `/auth/authorize`
+   - any request containing `storeToken=true`
+
+Example logic (pseudo-config):
+
+```yaml
+# Route order matters: put exclusions before handoff rewrite.
+routes:
+  - match:
+      path_prefix: "/auth/oidc/proxy-login"
+    action: forward_upstream
+
+  - match:
+      path_prefix: "/auth/oidc/proxy-logout"
+    action: forward_upstream
+
+  - match:
+      path_prefix: "/auth/login_flow"
+    action: forward_upstream
+
+  - match:
+      path_prefix: "/auth/authorize"
+    action: forward_upstream
+
+  - match:
+      query_contains: "storeToken=true"
+    action: forward_upstream
+
+  - match:
+      authenticated_oidc_session: true
+      method_in: ["GET"]
+      path_exact: "/"
+    action:
+      rewrite_path: "/auth/oidc/proxy-login"
+      forward_upstream: true
+
+  - match:
+      path_prefix: "/"
+    action: forward_upstream
+```
+
+Notes:
+- Keep rewrite scope narrow (`/` is typically enough) to reduce loop risk.
+- If your Envoy deployment can distinguish first-authenticated request from later traffic, apply rewrite only on that first transition.
+- Token exchange semantics here follow OAuth 2.0 Token Exchange; browser request routing is an Envoy deployment concern.
+
 ## All configuration Options
 
 Here's a table of all options that you can set:
