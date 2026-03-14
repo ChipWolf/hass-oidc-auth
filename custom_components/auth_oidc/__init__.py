@@ -176,8 +176,23 @@ async def _setup_oidc_provider(hass: HomeAssistant, my_config: dict, display_nam
         # Register the handoff middleware so that unauthenticated Keycloak
         # requests are automatically redirected to proxy-login without
         # needing an HTTPRoute URL rewrite on every request.
+        #
+        # By the time custom integrations load, the aiohttp Application has
+        # already been frozen (app.middlewares is a FrozenList). We bypass
+        # the freeze by replacing the internal list and rebuilding the
+        # compiled handler chain, similar to how HA itself patches
+        # ``app._router.freeze`` to allow late route registration.
         handoff_mw = create_handoff_middleware(oidc_client)
-        hass.http.app.middlewares.append(handoff_mw)
+        app = hass.http.app
+        # pylint: disable=protected-access
+        from frozenlist import FrozenList
+        import aiohttp.web_app as _wa
+
+        app._middlewares = FrozenList(list(app._middlewares) + [handoff_mw])
+        app._middlewares_handlers = tuple(app._prepare_middleware())
+        app._run_middlewares = True
+        _wa._cached_build_middleware.cache_clear()
+        # pylint: enable=protected-access
 
         # Pre-fetch the OIDC discovery document in the background so the
         # middleware has the Keycloak issuer available from the first request.
