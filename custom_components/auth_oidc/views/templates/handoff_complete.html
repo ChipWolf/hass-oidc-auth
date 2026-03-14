@@ -20,6 +20,26 @@
       errorEl.textContent = message;
     };
 
+    const hassUrl = window.location.origin;
+
+    // If the browser already has valid HA tokens (e.g. user revisiting
+    // from the same browser context), skip the login flow entirely and
+    // redirect straight to the dashboard.  The middleware always sends
+    // Keycloak-bearer requests here, so this short-circuit prevents
+    // unnecessary login-flow churn on subsequent visits.
+    try {
+      const existing = localStorage.getItem("hassTokens");
+      if (existing) {
+        const parsed = JSON.parse(existing);
+        if (parsed && parsed.access_token) {
+          window.location.replace("/?oidc_handoff=1");
+          return;
+        }
+      }
+    } catch (_) {
+      // Corrupted localStorage entry; fall through to full handoff.
+    }
+
     const postJson = async (url, payload) => {
       const response = await fetch(url, {
         method: "POST",
@@ -91,8 +111,12 @@
         return;
       }
 
+      // HA's frontend requires hassUrl and clientId in the stored tokens
+      // for WebSocket connection and token refresh to work.
+      tokenData.hassUrl = hassUrl;
+      tokenData.clientId = clientId;
       localStorage.setItem("hassTokens", JSON.stringify(tokenData));
-      window.location.replace("/");
+      window.location.replace("/?oidc_handoff=1");
     } catch (error) {
       showError(String(error));
     }

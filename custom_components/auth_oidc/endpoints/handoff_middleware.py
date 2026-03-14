@@ -1,30 +1,38 @@
-"""Middleware that triggers proxy-login for unauthenticated Envoy requests.
+"""Middleware that triggers proxy-login for Envoy-authenticated requests.
 
 When Envoy Gateway forwards a request with ``forwardAccessToken: true``,
 every request reaching HA carries an ``Authorization: Bearer <keycloak_token>``
-header.  After the token-handoff flow completes, the user has HA credentials
-and active refresh tokens stored server-side.
+header.
 
 The middleware uses lightweight JWT introspection (no signature verification,
 Envoy already validated the token) to determine whether the bearer token was
-issued by Keycloak.  It then checks HA's in-memory auth store for existing
-credentials and active refresh tokens for the user's ``sub`` claim.
+issued by Keycloak.  For browser navigation requests (``Accept: text/html``)
+bearing a valid Keycloak token, the middleware **always** redirects to
+``/auth/oidc/proxy-login`` which performs token exchange and populates the
+browser's ``localStorage`` with HA tokens via the handoff-complete page.
+
+Server-side session state is intentionally NOT checked.  HA's frontend
+requires ``hassTokens`` in ``localStorage`` to function; when a user opens a
+new browser context the server-side credentials still exist but the browser
+has nothing.  Skipping the handoff in that case would let HA's frontend fall
+through to the manual login page, defeating SSO.  The handoff flow is
+idempotent: ``async_get_or_create_credentials`` reuses existing credentials,
+and a fresh refresh token per browser session is cheap.  The rate limiter on
+``proxy-login`` (30 req/min per source IP) provides sufficient protection.
 
 Decision matrix:
-  +-----------------+--------------------+-------------------------------+
-  | Bearer issuer   | HA session exists   | Action                        |
-  +-----------------+--------------------+-------------------------------+
-  | Keycloak        | no                 | 302 -> /auth/oidc/proxy-login |
-  | Keycloak        | yes                | pass through                  |
-  | Not Keycloak    | any                | pass through                  |
-  | No bearer       | any                | pass through                  |
-  +-----------------+--------------------+-------------------------------+
+  +-----------------+-------------------------------+
+  | Bearer issuer   | Action                        |
+  +-----------------+-------------------------------+
+  | Keycloak        | 302 -> /auth/oidc/proxy-login |
+  | Not Keycloak    | pass through                  |
+  | No bearer       | pass through                  |
+  +-----------------+-------------------------------+
 """
 
 import base64
 import json
 import logging
-import time
 
 from aiohttp import web
 
@@ -34,24 +42,20 @@ _LOGGER = logging.getLogger(__name__)
 
 # Paths that must never be intercepted by the middleware.
 _PASSTHROUGH_PREFIXES = (
-    "/auth/oidc/",       # All plugin endpoints (proxy-login, handoff-complete, proxy-logout)
+    "/auth/oidc/",  # All plugin endpoints (proxy-login, handoff-complete, proxy-logout)
     "/auth/login_flow",  # HA login flow API (used by handoff-complete JS)
-    "/auth/token",       # HA token exchange endpoint
-    "/auth/authorize",   # HA authorize page
-    "/auth/providers",   # HA auth providers list
-    "/api/",             # HA REST API + WebSocket (frontend sends its own bearer)
-    "/static/",          # Static assets
-    "/frontend_latest/", # HA frontend bundles
-    "/frontend_es5/",    # HA frontend bundles (legacy)
-    "/hacsfiles/",       # HACS static files
-    "/local/",           # HA local static files
+    "/auth/token",  # HA token exchange endpoint
+    "/auth/authorize",  # HA authorize page
+    "/auth/providers",  # HA auth providers list
+    "/api/",  # HA REST API + WebSocket (frontend sends its own bearer)
+    "/static/",  # Static assets
+    "/frontend_latest/",  # HA frontend bundles
+    "/frontend_es5/",  # HA frontend bundles (legacy)
+    "/hacsfiles/",  # HACS static files
+    "/local/",  # HA local static files
     "/service_worker.js",
     "/manifest.json",
 )
-
-# Provider type and id used by this plugin.
-_PROVIDER_TYPE = "auth_oidc"
-_PROVIDER_ID = "default"
 
 
 def _decode_jwt_payload(token: str) -> dict | None:
@@ -73,61 +77,17 @@ def _decode_jwt_payload(token: str) -> dict | None:
         return None
 
 
-def _has_active_session(hass, sub: str) -> bool:
-    """Check if a Keycloak sub has HA credentials AND active refresh tokens.
-
-    Performs an in-memory scan of HA's auth store.  For the typical HA user
-    count (single digits) this is effectively instant.
-    """
-    # pylint: disable=protected-access
-    try:
-        users = hass.auth._store._users
-    except AttributeError:
-        _LOGGER.debug("handoff_middleware: unable to access auth store")
-        return False
-
-    now = time.time()
-
-    for user in users.values():
-        if user.system_generated or not user.is_active:
-            continue
-
-        # Look for OIDC credentials matching this sub.
-        has_oidc_cred = False
-        for cred in user.credentials:
-            if (
-                cred.auth_provider_type == _PROVIDER_TYPE
-                and cred.auth_provider_id == _PROVIDER_ID
-                and cred.data.get("sub") == sub
-            ):
-                has_oidc_cred = True
-                break
-
-        if not has_oidc_cred:
-            continue
-
-        # Check for at least one active (non-expired) normal refresh token.
-        for rt in user.refresh_tokens.values():
-            if rt.token_type != "normal":
-                continue
-            if rt.expire_at is not None and rt.expire_at <= now:
-                continue
-            return True
-
-        # Credentials exist but no active tokens.
-        return False
-
-    return False
-
-
 def create_handoff_middleware(oidc_client: OIDCClient) -> web.middleware:
-    """Return an aiohttp middleware that redirects un-handed-off Keycloak requests.
+    """Return an aiohttp middleware that redirects Keycloak-bearer requests.
+
+    Every browser navigation request carrying a valid Keycloak access token
+    is redirected to the proxy-login endpoint, which performs token exchange
+    and ensures the browser gets ``hassTokens`` in ``localStorage``.
 
     Args:
         oidc_client: The OIDC client instance, used to resolve the expected
             Keycloak issuer from the discovery document.
     """
-    hass = oidc_client.hass
 
     @web.middleware
     async def handoff_middleware(
@@ -141,19 +101,27 @@ def create_handoff_middleware(oidc_client: OIDCClient) -> web.middleware:
             if path.startswith(prefix) or path == prefix.rstrip("/"):
                 return await handler(request)
 
-        # 2. If there is no bearer token at all, pass through.
+        # 2. Only intercept browser navigation requests (Accept: text/html).
+        #    Sub-resource requests (images, scripts, favicons, service workers,
+        #    XHR/fetch without text/html) must pass through to avoid creating
+        #    parallel redirect chains that break the handoff-complete JS flow.
+        accept = request.headers.get("Accept", "")
+        if "text/html" not in accept:
+            return await handler(request)
+
+        # 3. If there is no bearer token at all, pass through.
         auth_header = request.headers.get("Authorization", "")
         if not auth_header.startswith("Bearer "):
             return await handler(request)
 
-        token = auth_header[len("Bearer "):]
+        token = auth_header[len("Bearer ") :]
 
-        # 3. Decode the JWT payload to check the issuer.
+        # 4. Decode the JWT payload to check the issuer.
         claims = _decode_jwt_payload(token)
         if claims is None:
             return await handler(request)
 
-        # 4. Compare issuer against the Keycloak issuer from OIDC discovery.
+        # 5. Compare issuer against the Keycloak issuer from OIDC discovery.
         expected_issuer = None
         try:
             discovery = oidc_client.discovery_document
@@ -163,29 +131,32 @@ def create_handoff_middleware(oidc_client: OIDCClient) -> web.middleware:
             pass
 
         if not expected_issuer:
-            _LOGGER.debug(
-                "handoff_middleware: discovery not loaded yet, passing through"
-            )
+            _LOGGER.debug("Discovery document not loaded, passing through")
             return await handler(request)
 
         token_issuer = claims.get("iss")
         if token_issuer != expected_issuer:
             return await handler(request)
 
-        # 5. Token IS from Keycloak. Check HA auth state for this user.
+        # 6. Token IS from Keycloak. Check sub claim exists.
         sub = claims.get("sub")
         if not sub:
+            _LOGGER.debug("Keycloak token has no sub claim")
             return await handler(request)
 
-        if _has_active_session(hass, sub):
+        # 7. If the request carries ?oidc_handoff=1, the browser just
+        #    completed the handoff flow and has hassTokens.  Pass through
+        #    so HA's frontend can load normally.
+        if request.query.get("oidc_handoff") == "1":
             return await handler(request)
 
-        # 6. Keycloak token present, no active HA session: trigger handoff.
-        _LOGGER.debug(
-            "handoff_middleware: Keycloak token for sub=%s on %s with no "
-            "active HA session, redirecting to proxy-login",
-            sub,
+        # 8. Always redirect to proxy-login for Keycloak-bearer browser
+        #    navigation.  The handoff flow is idempotent and ensures the
+        #    browser gets hassTokens in localStorage.
+        _LOGGER.info(
+            "Redirecting %s to proxy-login (sub=%s…)",
             path,
+            sub[:8],
         )
         raise web.HTTPFound(location="/auth/oidc/proxy-login")
 
