@@ -45,7 +45,6 @@ _PASSTHROUGH_PREFIXES = (
     "/auth/oidc/",  # All plugin endpoints (proxy-login, handoff-complete, proxy-logout)
     "/auth/login_flow",  # HA login flow API (used by handoff-complete JS)
     "/auth/token",  # HA token exchange endpoint
-    "/auth/authorize",  # HA authorize page
     "/auth/providers",  # HA auth providers list
     "/api/",  # HA REST API + WebSocket (frontend sends its own bearer)
     "/static/",  # Static assets
