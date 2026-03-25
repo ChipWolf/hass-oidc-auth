@@ -180,6 +180,20 @@ class OIDCProxyLoginView(HomeAssistantView):
 
         return None
 
+    def _sanitize_return_to(self, return_to: str | None) -> str | None:
+        """Allow only local /auth/authorize return targets."""
+        if not return_to:
+            return None
+
+        parsed = urllib.parse.urlparse(return_to)
+        if parsed.scheme or parsed.netloc:
+            return None
+
+        if not parsed.path.startswith("/auth/authorize"):
+            return None
+
+        return return_to
+
     async def _handle(self, request: web.Request) -> web.StreamResponse:
         """Handle token handoff request."""
         if not self.token_exchange_config.get(TOKEN_EXCHANGE_ENABLED, False):
@@ -217,6 +231,9 @@ class OIDCProxyLoginView(HomeAssistantView):
 
         code = await self.oidc_provider.async_save_user_info(user_details)
         handoff_url = "/auth/oidc/handoff-complete?code=" + urllib.parse.quote_plus(code)
+        return_to = self._sanitize_return_to(request.query.get("return_to"))
+        if return_to:
+            handoff_url += "&return_to=" + urllib.parse.quote_plus(return_to)
         raise web.HTTPFound(location=handoff_url)
 
     async def get(self, request: web.Request) -> web.StreamResponse:

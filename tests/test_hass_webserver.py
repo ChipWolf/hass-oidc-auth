@@ -2,6 +2,7 @@
 
 import os
 import ipaddress
+import urllib.parse
 from auth_oidc.config.const import (
     MODE,
     MODE_TOKEN_HANDOFF,
@@ -216,6 +217,57 @@ async def test_proxy_login_success(hass: HomeAssistant, hass_client):
 
 
 @pytest.mark.asyncio
+async def test_proxy_login_passes_mobile_authorize_return_to(
+    hass: HomeAssistant, hass_client
+):
+    """Test proxy-login preserves local mobile /auth/authorize return target."""
+    await setup_token_handoff(hass)
+
+    return_to = (
+        "/auth/authorize"
+        "?response_type=code"
+        "&client_id=https%3A%2F%2Fhome-assistant.io%2FiOS"
+        "&redirect_uri=homeassistant%3A%2F%2Fauth-callback"
+    )
+    encoded_return_to = urllib.parse.quote_plus(return_to)
+
+    with mock_oidc_responses():
+        client = await hass_client()
+        resp = await client.get(
+            f"/auth/oidc/proxy-login?return_to={encoded_return_to}",
+            headers={
+                "X-Forwarded-Access-Token": "envoy-token",
+            },
+            allow_redirects=False,
+        )
+    assert resp.status == 302
+    location = resp.headers["Location"]
+    assert location.startswith("/auth/oidc/handoff-complete?code=")
+    assert "&return_to=" in location
+    parsed = urllib.parse.urlparse(location)
+    query = urllib.parse.parse_qs(parsed.query)
+    assert query.get("return_to") == [return_to]
+
+
+@pytest.mark.asyncio
+async def test_proxy_login_ignores_nonlocal_return_to(hass: HomeAssistant, hass_client):
+    """Test proxy-login drops unsafe absolute return targets."""
+    await setup_token_handoff(hass)
+
+    with mock_oidc_responses():
+        client = await hass_client()
+        resp = await client.get(
+            "/auth/oidc/proxy-login?return_to=https%3A%2F%2Fevil.example%2F",
+            headers={
+                "X-Forwarded-Access-Token": "envoy-token",
+            },
+            allow_redirects=False,
+        )
+    assert resp.status == 302
+    assert "&return_to=" not in resp.headers["Location"]
+
+
+@pytest.mark.asyncio
 async def test_handoff_complete_page_requires_code(hass: HomeAssistant, hass_client):
     """Test handoff complete endpoint rejects missing code."""
     await setup_token_handoff(hass)
@@ -242,6 +294,30 @@ async def test_handoff_complete_page_bootstrap(hass: HomeAssistant, hass_client)
     assert "/auth/login_flow" in text
     assert "hassTokens" in text
     assert "test-code" in text
+
+
+@pytest.mark.asyncio
+async def test_handoff_complete_page_mobile_context(hass: HomeAssistant, hass_client):
+    """Test handoff page receives mobile authorize return target."""
+    await setup_token_handoff(hass)
+
+    return_to = (
+        "/auth/authorize"
+        "?response_type=code"
+        "&client_id=https%3A%2F%2Fhome-assistant.io%2FiOS"
+        "&redirect_uri=homeassistant%3A%2F%2Fauth-callback"
+    )
+    encoded_return_to = urllib.parse.quote_plus(return_to)
+
+    client = await hass_client()
+    resp = await client.get(
+        f"/auth/oidc/handoff-complete?code=test-code&return_to={encoded_return_to}",
+        allow_redirects=False,
+    )
+    assert resp.status == 200
+    text = await resp.text()
+    assert "const returnTo =" in text
+    assert "homeassistant://auth-callback" in text
 
 
 @pytest.mark.asyncio

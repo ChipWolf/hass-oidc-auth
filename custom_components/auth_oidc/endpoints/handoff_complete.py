@@ -18,6 +18,7 @@ class OIDCHandoffCompleteView(HomeAssistantView):
     async def get(self, request: web.Request) -> web.Response:
         """Show the auto-complete handoff page."""
         code = request.query.get("code")
+        return_to = request.query.get("return_to")
         if not code:
             view_html = await get_view(
                 "error",
@@ -25,5 +26,8 @@ class OIDCHandoffCompleteView(HomeAssistantView):
             )
             return web.Response(text=view_html, content_type="text/html", status=400)
 
-        view_html = await get_view("handoff_complete", {"code": code})
+        view_html = await get_view(
+            "handoff_complete",
+            {"code": code, "return_to": return_to},
+        )
         return web.Response(text=view_html, content_type="text/html")

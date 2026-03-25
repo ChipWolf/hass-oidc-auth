@@ -5,12 +5,19 @@
     <h1 class="text-2xl font-bold mb-4">Completing sign-in...</h1>
     <p id="status" class="mb-4">Please wait, you will be redirected automatically.</p>
     <pre id="error" class="hidden text-left text-sm bg-red-50 text-red-700 p-3 rounded"></pre>
+    <div
+      id="handoff-data"
+      data-code="{{ code | e }}"
+      data-return-to="{{ return_to | default('', true) | e }}"
+      class="hidden"
+    ></div>
 </div>
 
 <script>
   (async () => {
-    const code = {{ code | tojson }};
-    const clientId = `${window.location.origin}/`;
+    const handoffData = document.getElementById("handoff-data");
+    const code = handoffData?.dataset?.code || "";
+    const returnTo = handoffData?.dataset?.returnTo || "";
     const statusEl = document.getElementById("status");
     const errorEl = document.getElementById("error");
 
@@ -21,6 +28,43 @@
     };
 
     const hassUrl = window.location.origin;
+    const mobileAuthContext = (() => {
+      if (!returnTo) {
+        return null;
+      }
+
+      try {
+        const authorizeUrl = new URL(returnTo, window.location.origin);
+        if (authorizeUrl.pathname !== "/auth/authorize") {
+          return null;
+        }
+
+        const redirectUri = authorizeUrl.searchParams.get("redirect_uri");
+        const requestedClientId = authorizeUrl.searchParams.get("client_id");
+        if (!redirectUri || !requestedClientId) {
+          return null;
+        }
+
+        const isMobileRedirect =
+          redirectUri.startsWith("homeassistant://auth-callback") ||
+          redirectUri.startsWith("homeassistant-dev://auth-callback") ||
+          redirectUri.startsWith("homeassistant-beta://auth-callback");
+        if (!isMobileRedirect) {
+          return null;
+        }
+
+        return {
+          clientId: requestedClientId,
+          redirectUri,
+        };
+      } catch (_) {
+        return null;
+      }
+    })();
+
+    const clientId = mobileAuthContext?.clientId ?? `${window.location.origin}/`;
+    const redirectUri =
+      mobileAuthContext?.redirectUri ?? `${window.location.origin}/?auth_callback=1`;
 
     const postJson = async (url, payload) => {
       const response = await fetch(url, {
@@ -44,7 +88,7 @@
         {
           client_id: clientId,
           handler: ["auth_oidc", "default"],
-          redirect_uri: `${window.location.origin}/?auth_callback=1`,
+          redirect_uri: redirectUri,
           type: "form",
         }
       );
@@ -68,11 +112,26 @@
         return;
       }
 
+      const authCode =
+        finishData?.data?.auth_code ||
+        (typeof finishData?.result === "string" ? finishData.result : null);
+
+      if (mobileAuthContext) {
+        if (!authCode) {
+          showError(`Missing auth code for app callback: ${JSON.stringify(finishData)}`);
+          return;
+        }
+
+        const callbackUrl = new URL(mobileAuthContext.redirectUri);
+        callbackUrl.searchParams.set("code", authCode);
+        window.location.replace(callbackUrl.toString());
+        return;
+      }
+
       let tokenData = null;
       if (finishData?.data?.access_token) {
         tokenData = finishData.data;
-      } else if (finishData?.data?.auth_code || typeof finishData?.result === "string") {
-        const authCode = finishData?.data?.auth_code || finishData?.result;
+      } else if (authCode) {
         const tokenResponse = await fetch("/auth/token", {
           method: "POST",
           headers: { "Content-Type": "application/x-www-form-urlencoded" },

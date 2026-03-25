@@ -33,6 +33,7 @@ Decision matrix:
 import base64
 import json
 import logging
+import urllib.parse
 
 from aiohttp import web
 
@@ -152,11 +153,24 @@ def create_handoff_middleware(oidc_client: OIDCClient) -> web.middleware:
         # 8. Always redirect to proxy-login for Keycloak-bearer browser
         #    navigation.  The handoff flow is idempotent and ensures the
         #    browser gets hassTokens in localStorage.
+        proxy_login_location = "/auth/oidc/proxy-login"
+        redirect_uri = request.query.get("redirect_uri", "")
+        if (
+            path == "/auth/authorize"
+            and redirect_uri.startswith(
+                ("homeassistant://", "homeassistant-dev://", "homeassistant-beta://")
+            )
+        ):
+            return_to = path
+            if request.query_string:
+                return_to += f"?{request.query_string}"
+            proxy_login_location += "?return_to=" + urllib.parse.quote_plus(return_to)
+
         _LOGGER.info(
             "Redirecting %s to proxy-login (sub=%s…)",
             path,
             sub[:8],
         )
-        raise web.HTTPFound(location="/auth/oidc/proxy-login")
+        raise web.HTTPFound(location=proxy_login_location)
 
     return handoff_middleware
